@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src https://api.github.com; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>Webjjongku 승인</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:680px;margin:48px auto;padding:0 18px;line-height:1.55}.card{border:1px solid #bbb;border-radius:14px;padding:22px}input{width:100%;box-sizing:border-box;padding:11px;font-family:monospace}button{margin-top:12px;padding:10px 16px;font-weight:700;cursor:pointer}.ok{color:#087a2f}.err{color:#b00020}.muted{color:#666}code{background:#f2f2f2;padding:2px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<h1>Webjjongku 승인</h1>
+<div class="card">
+  <div id="setup" hidden>
+    <p>최초 1회 설정입니다. <strong>webjjongku-control Issues 전용 fine-grained token</strong>을 저장합니다.</p>
+    <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="github_pat_...">
+    <button id="save">이 브라우저에 저장</button>
+    <p class="muted">토큰은 이 브라우저의 localStorage에만 저장되며 페이지 소스나 승인 URL에는 포함되지 않습니다.</p>
+  </div>
+  <div id="run" hidden>
+    <p id="summary">승인 요청을 확인하는 중...</p>
+    <p id="status"></p>
+    <button id="forget" hidden>저장된 GitHub 토큰 지우기</button>
+  </div>
+</div>
+<script>
+const REPO='gunddk24-sketch/webjjongku-control';
+const TOKEN_KEY='webjjongku.github.issues-token.v1';
+const SUBMITTED_PREFIX='webjjongku.approved.';
+const setup=document.getElementById('setup'),run=document.getElementById('run'),statusEl=document.getElementById('status'),summaryEl=document.getElementById('summary'),forget=document.getElementById('forget');
+function fail(msg){statusEl.textContent=msg;statusEl.className='err';forget.hidden=false}
+function ok(msg){statusEl.textContent=msg;statusEl.className='ok'}
+function decodePackage(){const raw=location.hash.startsWith('#approve=')?location.hash.slice(9):'';if(!raw)return null;const b64=raw.replace(/-/g,'+').replace(/_/g,'/');const padded=b64+'='.repeat((4-b64.length%4)%4);const bytes=Uint8Array.from(atob(padded),c=>c.charCodeAt(0));return JSON.parse(new TextDecoder().decode(bytes))}
+async function checkToken(token){const r=await fetch('https://api.github.com/repos/'+REPO,{headers:{Authorization:'Bearer '+token,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}});if(!r.ok)throw new Error('GitHub 토큰 검증 실패 ('+r.status+')');const d=await r.json();if(d.full_name!==REPO||d.private!==true)throw new Error('예상한 private control repo가 아닙니다.')}
+async function submit(pkg){
+  if(!pkg||pkg.v!==1||pkg.repo!==REPO)throw new Error('승인 링크 형식이 올바르지 않습니다.');
+  if(!/^[0-9a-f-]{36}$/i.test(pkg.approval_id||''))throw new Error('승인 ID가 올바르지 않습니다.');
+  if(Date.now()>Date.parse(pkg.expires_utc))throw new Error('승인 링크가 만료되었습니다.');
+  if(!String(pkg.title||'').startsWith('WEBJJONGKU APPROVE '))throw new Error('승인 제목이 올바르지 않습니다.');
+  if(!String(pkg.body||'').startsWith('WEBJJONGKU_APPROVAL_JSON_V1\n'))throw new Error('승인 본문이 올바르지 않습니다.');
+  summaryEl.textContent=`${pkg.project_id} · ${pkg.files.join(', ')} · ${pkg.edit_count}개 수정 승인 중`;
+  const doneKey=SUBMITTED_PREFIX+pkg.approval_id,prior=localStorage.getItem(doneKey);if(prior){ok('이미 승인한 작업입니다. GitHub Issue #'+prior);return}
+  const token=localStorage.getItem(TOKEN_KEY);if(!token){setup.hidden=false;run.hidden=true;return}
+  const r=await fetch('https://api.github.com/repos/'+REPO+'/issues',{method:'POST',headers:{Authorization:'Bearer '+token,Accept:'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},body:JSON.stringify({title:pkg.title,body:pkg.body})});
+  if(!r.ok)throw new Error('GitHub 승인 전송 실패 ('+r.status+')');
+  const issue=await r.json();localStorage.setItem(doneKey,String(issue.number));history.replaceState(null,'',location.pathname);ok('승인 완료 · GitHub Issue #'+issue.number+' · 집 A가 자동 처리합니다.')
+}
+async function start(){run.hidden=false;const pkg=decodePackage();if(!pkg){summaryEl.textContent='승인 링크가 없습니다.';return}try{await submit(pkg)}catch(e){fail(e.message||String(e))}}
+document.getElementById('save').onclick=async()=>{const token=document.getElementById('token').value.trim();try{if(token.length<20)throw new Error('토큰이 너무 짧습니다.');await checkToken(token);localStorage.setItem(TOKEN_KEY,token);document.getElementById('token').value='';setup.hidden=true;await start()}catch(e){setup.hidden=false;run.hidden=false;fail(e.message||String(e))}};
+forget.onclick=()=>{localStorage.removeItem(TOKEN_KEY);statusEl.textContent='저장된 토큰을 지웠습니다.';setup.hidden=false;forget.hidden=true};
+start();
+</script>
+</body>
+</html>
