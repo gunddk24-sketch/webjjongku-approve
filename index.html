@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src https://api.github.com; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src https://api.github.com; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
 <title>Webjjongku 승인</title>
 <style>
 body{font-family:system-ui,sans-serif;max-width:680px;margin:48px auto;padding:0 18px;line-height:1.55}.card{border:1px solid #bbb;border-radius:14px;padding:22px}input{width:100%;box-sizing:border-box;padding:11px;font-family:monospace}button{margin-top:12px;padding:10px 16px;font-weight:700;cursor:pointer}.ok{color:#087a2f}.err{color:#b00020}.muted{color:#666}code{background:#f2f2f2;padding:2px 5px;border-radius:4px}
@@ -21,10 +22,18 @@ body{font-family:system-ui,sans-serif;max-width:680px;margin:48px auto;padding:0
   <div id="run" hidden>
     <p id="summary">승인 요청을 확인하는 중...</p>
     <p id="status"></p>
+    <section id="proposal" hidden>
+      <p>ChatGPT가 만든 proposal JSON 파일을 선택하고 내용을 검토한 뒤 한 번 승인합니다. 파일 선택은 승인이 아닙니다.</p>
+      <input id="proposal-file" type="file" accept=".json,application/json">
+      <pre id="proposal-preview" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:60vh;overflow:auto"></pre>
+      <button id="proposal-approve" disabled>승인·전송</button>
+      <p>전송 중 페이지를 닫지 마세요. 실패하거나 응답이 불확실하면 자동 재전송하지 않습니다. approval_status로 먼저 확인하세요.</p>
+    </section>
     <button id="forget" hidden>저장된 GitHub 토큰 지우기</button>
   </div>
 </div>
-<script>
+<script type="module">
+import {encodeProposal,uploadProposal} from './proposal-protocol.mjs';
 const REPO='gunddk24-sketch/webjjongku-control';
 const TOKEN_KEY='webjjongku.github.issues-token.v1';
 const SUBMITTED_PREFIX='webjjongku.approved.';
@@ -34,11 +43,11 @@ function ok(msg){statusEl.textContent=msg;statusEl.className='ok'}
 function decodePackage(){const raw=location.hash.startsWith('#approve=')?location.hash.slice(9):'';if(!raw)return null;const b64=raw.replace(/-/g,'+').replace(/_/g,'/');const padded=b64+'='.repeat((4-b64.length%4)%4);const bytes=Uint8Array.from(atob(padded),c=>c.charCodeAt(0));return JSON.parse(new TextDecoder().decode(bytes))}
 async function checkToken(token){const r=await fetch('https://api.github.com/repos/'+REPO,{headers:{Authorization:'Bearer '+token,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}});if(!r.ok)throw new Error('GitHub 토큰 검증 실패 ('+r.status+')');const d=await r.json();if(d.full_name!==REPO||d.private!==true)throw new Error('예상한 private control repo가 아닙니다.')}
 async function submit(pkg){
-  if(!pkg||pkg.v!==1||pkg.repo!==REPO)throw new Error('승인 링크 형식이 올바르지 않습니다.');
+  if(!pkg||![1,2].includes(pkg.v)||pkg.repo!==REPO)throw new Error('승인 링크 형식이 올바르지 않습니다.');
   if(!/^[0-9a-f-]{36}$/i.test(pkg.approval_id||''))throw new Error('승인 ID가 올바르지 않습니다.');
   if(Date.now()>Date.parse(pkg.expires_utc))throw new Error('승인 링크가 만료되었습니다.');
   if(!String(pkg.title||'').startsWith('WEBJJONGKU APPROVE '))throw new Error('승인 제목이 올바르지 않습니다.');
-  if(!String(pkg.body||'').startsWith('WEBJJONGKU_APPROVAL_JSON_V1\n'))throw new Error('승인 본문이 올바르지 않습니다.');
+  if(!/^WEBJJONGKU_APPROVAL_(?:JSON_V1|REF_V2)\n/.test(String(pkg.body||'')))throw new Error('승인 본문이 올바르지 않습니다.');
   summaryEl.textContent=`${pkg.project_id} · ${pkg.files.join(', ')} · ${pkg.edit_count}개 수정 승인 중`;
   const doneKey=SUBMITTED_PREFIX+pkg.approval_id,prior=localStorage.getItem(doneKey);if(prior){ok('이미 승인한 작업입니다. GitHub Issue #'+prior);return}
   const token=localStorage.getItem(TOKEN_KEY);if(!token){setup.hidden=false;run.hidden=true;return}
@@ -46,9 +55,39 @@ async function submit(pkg){
   if(!r.ok)throw new Error('GitHub 승인 전송 실패 ('+r.status+')');
   const issue=await r.json();localStorage.setItem(doneKey,String(issue.number));history.replaceState(null,'',location.pathname);ok('승인 완료 · GitHub Issue #'+issue.number+' · 집 A가 자동 처리합니다.')
 }
-async function start(){run.hidden=false;const pkg=decodePackage();if(!pkg){summaryEl.textContent='승인 링크가 없습니다.';return}try{await submit(pkg)}catch(e){fail(e.message||String(e))}}
+async function start(){run.hidden=false;if(location.hash==='#proposal'){showProposal();return}const pkg=decodePackage();if(!pkg){summaryEl.textContent='승인 링크가 없습니다.';return}try{await submit(pkg)}catch(e){fail(e.message||String(e))}}
 document.getElementById('save').onclick=async()=>{const token=document.getElementById('token').value.trim();try{if(token.length<20)throw new Error('토큰이 너무 짧습니다.');await checkToken(token);localStorage.setItem(TOKEN_KEY,token);document.getElementById('token').value='';setup.hidden=true;await start()}catch(e){setup.hidden=false;run.hidden=false;fail(e.message||String(e))}};
 forget.onclick=()=>{localStorage.removeItem(TOKEN_KEY);statusEl.textContent='저장된 토큰을 지웠습니다.';setup.hidden=false;forget.hidden=true};
+let selected=null;
+const proposalEl=document.getElementById('proposal'),fileEl=document.getElementById('proposal-file'),previewEl=document.getElementById('proposal-preview'),approveEl=document.getElementById('proposal-approve');
+function showProposal(){proposalEl.hidden=false;summaryEl.textContent='원격 deterministic 작업 승인 · 최대 4 MiB';if(!localStorage.getItem(TOKEN_KEY))setup.hidden=false;}
+fileEl.onchange=async()=>{
+  selected=null;approveEl.disabled=true;previewEl.textContent='';
+  try{
+    const file=fileEl.files[0];if(!file)return;if(file.size>4194304)throw new Error('4 MiB를 초과했습니다.');
+    const value=await encodeProposal(new Uint8Array(await file.arrayBuffer()));
+    selected=value;
+    previewEl.textContent=JSON.stringify(value.proposal,null,2)+'\nExact file SHA-256: '+value.sha256+'\nUpload chunks: '+value.chunks.length;
+    approveEl.disabled=false;
+  }catch(e){fail(e.message)}
+};
+approveEl.onclick=async()=>{
+  if(!selected)return;
+  const token=localStorage.getItem(TOKEN_KEY);if(!token){setup.hidden=false;fail('최초 GitHub 토큰 설정 후 승인 버튼을 누르세요.');return}
+  const value=selected,id=value.proposal.proposal_id,key=SUBMITTED_PREFIX+'remote.'+id;
+  if(localStorage.getItem(key)){fail('이미 전송을 시도한 ID입니다. ChatGPT approval_status로 확인하세요. 자동 재전송하지 않습니다.');return}
+  approveEl.disabled=true;fileEl.disabled=true;
+  try{
+    await checkToken(token);
+    localStorage.setItem(key,'attempted');
+    const api=async(route,body)=>{
+      const r=await fetch('https://api.github.com/repos/'+REPO+route,{method:'POST',redirect:'error',signal:AbortSignal.timeout(30000),headers:{Authorization:'Bearer '+token,Accept:'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},body:JSON.stringify(body)});
+      if(!r.ok)throw new Error('전송 중단 ('+r.status+'). 승인 ID '+id+' 결과를 확인하세요.');return r.json();
+    };
+    const r=await uploadProposal(value,api,{progress:(n,total)=>ok('전송 중 '+n+'/'+total+' · 아직 최종 승인 기록 전')});
+    localStorage.setItem(key,String(r.issue_number));ok('승인 전송 완료 · Issue #'+r.issue_number+' · approval_status: '+id);
+  }catch(e){fail(e.message+' · 자동 재시도 없음. approval_status: '+id)}
+};
 start();
 </script>
 </body>
